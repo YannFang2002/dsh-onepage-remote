@@ -1,0 +1,16 @@
+# Python / ASR local state
+.venv/
+venv/
+models/
+__pycache__/
+*.pyc
+bridge.log
+
+# Pack artifacts
+*.tgz
+*.tar.gz
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db

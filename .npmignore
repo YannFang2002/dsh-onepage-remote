@@ -1,0 +1,12 @@
+﻿**/__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+models/
+*.tgz
+*.tar.gz
+bridge.log
+.vscode/
+.DS_Store
+Thumbs.db

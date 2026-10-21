@@ -1,0 +1,35 @@
+{
+  "name": "dsh-onepage-remote",
+  "version": "0.1.2",
+  "private": false,
+  "description": "OnePage Agent Remote: DSH host plugin + ASR bridge + LAN discovery",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "index.js",
+    "bridge/",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "onepage",
+    "agent-remote"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YannFang2002/dsh-onepage-remote.git"
+  }
+}
