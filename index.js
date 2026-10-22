@@ -23,6 +23,9 @@ export const inject = ['agents', 'sessions']
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN_PORTS = [8766, 8767, 8768, 8769, 8770]
 const BRIDGE_PORTS = [8765, 8766, 8767, 8768, 8769, 8770]
+// Bumped on every restart so a dying child cannot respawn itself on top of the
+// one that replaced it.
+let bridgeGeneration = 0
 
 // Host-side runtime state for the loopback status page.
 //
@@ -36,6 +39,7 @@ const runtime = {
   bridgePort: null,
   bridgePid: null,
   bridgeStatus: 'not started',
+  bridgeStopping: false,
   bridgeLog: path.join(os.tmpdir(), 'onepage-bridge.log'),
 }
 
@@ -223,7 +227,7 @@ function isFree(port, host) {
   })
 }
 
-function startBridge(ctx, bridgePort, pluginPort) {
+function startBridge(ctx, bridgePort, pluginPort, generation) {
   if (!fs.existsSync(DEFAULT_PYTHON) || !fs.existsSync(DEFAULT_SCRIPT)) {
     ctx.logger?.warn?.('[onepage-hub] bridge python/script not found; running plugin-only')
     return null
@@ -256,8 +260,19 @@ function startBridge(ctx, bridgePort, pluginPort) {
   runtime.bridgeStatus = 'running'
 
   child.on('exit', (code, signal) => {
+    // A restart or shutdown bump the generation first; a stale child must not
+    // fight the live one for port 8765 or schedule its own respawn.
+    if (typeof generation === 'number' && generation !== bridgeGeneration) return
     runtime.bridgeStatus = `exited (code=${code}${signal ? `, signal=${signal}` : ''})`
     ctx.logger?.warn?.(`[onepage-hub] bridge exited code=${code} signal=${signal}`)
+    // The device is useless without the bridge, so recover automatically. The
+    // restart route calls the same path, which is what lets bridge/server.py
+    // changes take effect without restarting DSH itself.
+    if (!runtime.bridgeStopping) {
+      setTimeout(() => {
+        if (!runtime.bridgeStopping) runtime.restartBridge?.('auto')
+      }, 1500)
+    }
   })
   child.on('error', (error) => {
     runtime.bridgeStatus = `spawn failed: ${error}`
@@ -273,6 +288,32 @@ export function apply(ctx) {
   let lastReply = ''
   let lastSessionId
   let bridge
+
+  // Restarting only the bridge is enough for bridge/server.py changes: it is a
+  // separate process that re-reads the file on spawn, so DSH itself does not
+  // have to be restarted. (Host plugin code, index.js, still needs an app
+  // restart -- Cordis loads it once at boot.)
+  runtime.restartBridge = (reason) => {
+    const port = runtime.bridgePort
+    if (port === null || port === undefined || runtime.pluginPort === null) return false
+    bridgeGeneration += 1
+    runtime.bridgeStopping = true
+    try {
+      bridge?.child?.kill()
+    } catch {
+      // already gone
+    }
+    try {
+      if (bridge?.logFd) fs.closeSync(bridge.logFd)
+    } catch {
+      // already closed
+    }
+    bridge = null
+    runtime.bridgeStopping = false
+    ctx.logger?.info?.(`[onepage-hub] 重启桥（${reason}）`)
+    bridge = startBridge(ctx, port, runtime.pluginPort, bridgeGeneration)
+    return bridge !== null
+  }
 
   ctx.on('session/event', (session, event) => {
     if (event?.type !== 'assistant/message') return
@@ -399,10 +440,12 @@ export function apply(ctx) {
       return
     }
 
-    bridge = startBridge(ctx, bridgePort, pluginPort)
+    bridge = startBridge(ctx, bridgePort, pluginPort, ++bridgeGeneration)
   })()
 
   ctx.effect(() => () => {
+    runtime.bridgeStopping = true
+    bridgeGeneration += 1
     try {
       server.close()
     } catch {
@@ -520,6 +563,19 @@ export function apply(ctx) {
     sendJson(res, 200, result ?? { ok: false, error: 'bridge_down' })
   }
 
+  const restartHandler = async (req, res) => {
+    if (!isLocalRequest(req)) {
+      sendJson(res, 403, { ok: false, error: 'local_only' })
+      return
+    }
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { ok: false, error: 'method_not_allowed' })
+      return
+    }
+    const restarted = runtime.restartBridge ? runtime.restartBridge('manual') : false
+    sendJson(res, 200, { ok: restarted, bridgeStatus: runtime.bridgeStatus, bridgePort: runtime.bridgePort })
+  }
+
   try {
     ctx.inject?.(['webServer'], (httpCtx) => {
       disposeRoute(() => httpCtx.webServer.register({ kind: 'exact', path: `${PLUGIN_PREFIX}/diag`, handler: diagHandler }))
@@ -528,7 +584,10 @@ export function apply(ctx) {
       disposeRoute(() =>
         httpCtx.webServer.register({ kind: 'exact', path: `${PLUGIN_PREFIX}/asr/install`, handler: installHandler }),
       )
-      ctx.logger?.info?.(`[onepage-hub] overlay 路由已注册: ${PLUGIN_PREFIX}/{diag,send,asr,asr/install}`)
+      disposeRoute(() =>
+        httpCtx.webServer.register({ kind: 'exact', path: `${PLUGIN_PREFIX}/bridge/restart`, handler: restartHandler }),
+      )
+      ctx.logger?.info?.(`[onepage-hub] overlay 路由已注册: ${PLUGIN_PREFIX}/{diag,send,asr,asr/install,bridge/restart}`)
     })
   } catch (error) {
     ctx.logger?.warn?.(`[onepage-hub] 无法注册 overlay 路由: ${error}`)
