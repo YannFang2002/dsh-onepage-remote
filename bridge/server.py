@@ -101,13 +101,34 @@ def bump(key: str) -> None:
 
 
 def first_sentence(text: str, max_chars: int = 120) -> str:
-    """The device shows one sentence: it cannot render Markdown and a full reply
-    never fits. Strip markers, collapse whitespace, cut at the first terminator."""
-    cleaned = re.sub(r"[*`#_~]", "", str(text))
+    """Pick a one-sentence summary from an agent reply.
+
+    The device cannot render Markdown and cannot fit a full answer, and the blind
+    "first sentence" is usually filler ("好的，我先看一下"). So: drop code blocks,
+    prefer an explicit 结论/总结 section, skip filler openings, and favour a
+    sentence that carries a result word. Kept in sync with summarizeReply() in
+    index.js (this path also serves the mock, without the plugin).
+    """
+    cleaned = re.sub(r"```[\s\S]*?```", " ", str(text))
+    section = re.search(
+        r"(?:^|\n)#{1,6}\s*(?:结论|总结|小结|Summary|Conclusion)[^\n]*\n+([\s\S]{0,400})", cleaned
+    )
+    if section:
+        cleaned = section.group(1)
+    cleaned = re.sub(r"[*`#_~>|]", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    match = re.match(r"^[^。！？!?]*[。！？!?]", cleaned)
-    sentence = match.group(0) if match else cleaned
-    return sentence if len(sentence) <= max_chars else sentence[:max_chars] + "…"
+    sentences = [s.strip() for s in re.split(r"(?<=[。！？!?])\s*", cleaned) if s.strip()]
+    if not sentences:
+        return ""
+    filler = re.compile(r"^(好的|好|嗯|明白|收到|让我|我来|我先|我会|接下来|现在|OK|Sure|Let me|I'?ll|Alright)", re.I)
+    signal = re.compile(
+        r"(完成|已|通过|失败|修复|新增|删除|搞定|结论|因此|所以|结果|成功|报错|问题|done|fixed|added|failed|passes|result)",
+        re.I,
+    )
+    best = next((s for s in sentences if signal.search(s) and not filler.search(s)), None)
+    if best is None:
+        best = next((s for s in sentences if not filler.search(s)), sentences[0])
+    return best if len(best) <= max_chars else best[:max_chars] + "…"
 
 
 try:

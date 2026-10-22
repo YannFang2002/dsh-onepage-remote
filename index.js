@@ -110,17 +110,30 @@ function textOf(content) {
     .trim()
 }
 
-// The e-ink panel cannot render Markdown and a full agent answer never fits, so
-// the device's contract is "first sentence only". Trim it here, once, instead of
-// letting every consumer chop the string mid-word.
-function firstSentence(text, maxChars = 120) {
-  const cleaned = String(text ?? '')
-    .replace(/[*`#_~]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-  const match = cleaned.match(/^[^。！？!?]*[。！？!?]/)
-  const sentence = match ? match[0] : cleaned
-  return sentence.length > maxChars ? `${sentence.slice(0, maxChars)}…` : sentence
+// The e-ink panel cannot render Markdown and never fits a full answer, so it gets
+// ONE sentence. Blindly taking the first one is not good enough: agent replies
+// very often open with filler ("好的，我先看一下代码。") that says nothing.
+//
+// A plugin cannot force the model to write a summary first -- that is a prompt /
+// preset concern, not a transport one -- so this picks the most summary-like
+// sentence after the fact: drop code blocks, prefer an explicit 结论/总结 section,
+// skip filler openings, favour a sentence that carries a result word.
+function summarizeReply(text, maxChars = 120) {
+  const raw = String(text ?? '')
+  let cleaned = raw.replace(/```[\s\S]*?```/g, ' ')
+  const section = cleaned.match(/(?:^|\n)#{1,6}\s*(?:结论|总结|小结|Summary|Conclusion)[^\n]*\n+([\s\S]{0,400})/)
+  if (section) cleaned = section[1]
+  cleaned = cleaned.replace(/[*`#_~>|]/g, ' ').replace(/\s+/g, ' ').trim()
+  const sentences = cleaned
+    .split(/(?<=[。！？!?])\s*/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean)
+  if (sentences.length === 0) return ''
+  const filler = /^(好的|好|嗯|明白|收到|让我|我来|我先|我会|接下来|现在|OK|Sure|Let me|I'?ll|Alright)/i
+  const signal = /(完成|已|通过|失败|修复|新增|删除|搞定|结论|因此|所以|结果|成功|报错|问题|done|fixed|added|failed|passes|result)/i
+  let best = sentences.find((sentence) => signal.test(sentence) && !filler.test(sentence))
+  if (!best) best = sentences.find((sentence) => !filler.test(sentence)) ?? sentences[0]
+  return best.length > maxChars ? `${best.slice(0, maxChars)}…` : best
 }
 
 function liveAgents(ctx) {
@@ -333,7 +346,7 @@ export function apply(ctx) {
     const text = textOf(event.data?.message?.content).replace(/\s+/g, ' ').trim()
     if (text.length === 0) return
     lastSessionId = session?.id
-    lastReply = firstSentence(text)
+    lastReply = summarizeReply(text)
   })
 
   const server = http.createServer(async (req, res) => {
