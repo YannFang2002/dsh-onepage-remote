@@ -41,7 +41,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
 HERE = os.path.dirname(os.path.abspath(__file__))
-MODEL_DIR = os.environ.get("ONEPAGE_MODEL_DIR", os.path.join(HERE, "models"))
+
+
+def default_data_dir() -> str:
+    """Where the venv, models and config live.
+
+    A local Whisper install is ~600 MB; on Windows it defaults to D: so it never
+    eats the user profile on C:. Override with ONEPAGE_DATA_DIR.
+    """
+    if os.name == "nt":
+        return "D:\\onepage-agent"
+    return os.path.join(os.path.expanduser("~"), ".onepage-agent")
+
+
+DATA_DIR = os.environ.get("ONEPAGE_DATA_DIR", default_data_dir())
+MODEL_DIR = os.environ.get("ONEPAGE_MODEL_DIR", os.path.join(DATA_DIR, "models"))
 MODEL_NAME = os.environ.get("WHISPER_MODEL", "small")
 LANGUAGE = os.environ.get("WHISPER_LANG", "zh")
 DSH_URL = os.environ.get("DSH_URL", "http://127.0.0.1:8766").rstrip("/")
@@ -428,7 +442,9 @@ def scan_loop() -> None:
         time.sleep(2)
 
 
-ASR_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".onepage-agent", "asr.json")
+ASR_CONFIG_PATH = os.path.join(DATA_DIR, "asr.json")
+# Where the previous default kept it; read once so an existing choice survives.
+LEGACY_ASR_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".onepage-agent", "asr.json")
 
 # Two very different ASR costs live behind the same device endpoint:
 #   local -> faster-whisper on this CPU. No key, no audio leaves the machine,
@@ -446,7 +462,7 @@ ASR_DEFAULTS = {
     "api_model": os.environ.get("ONEPAGE_ASR_MODEL", "whisper-1"),
     # Where the local stack lives. Both are editable from the UI so the ~600 MB
     # of venv + model can go on another drive instead of the system disk.
-    "venv_path": os.environ.get("ONEPAGE_ASR_VENV", os.path.join(os.path.expanduser("~"), ".onepage-agent", "venv")),
+    "venv_path": os.environ.get("ONEPAGE_ASR_VENV", os.path.join(DATA_DIR, "venv")),
     "model_dir": os.environ.get("ONEPAGE_ASR_MODEL_DIR", MODEL_DIR),
     # How the one-sentence summary for the e-ink panel is produced:
     #   heuristic -> free, instant, picks a sentence out of the reply
@@ -459,17 +475,31 @@ ASR_DEFAULTS = {
 
 
 def load_asr_config() -> dict:
-    """Saved settings in ~/.onepage-agent/asr.json, overridden by env vars."""
+    """Saved settings in <data dir>/asr.json, overridden by env vars.
+
+    The data dir default moved from %USERPROFILE%\\.onepage-agent to
+    D:\\onepage-agent; the old file is read once and copied forward so an
+    existing backend choice is not silently lost.
+    """
     config = dict(ASR_DEFAULTS)
+    source = ASR_CONFIG_PATH if os.path.exists(ASR_CONFIG_PATH) else LEGACY_ASR_CONFIG_PATH
     try:
-        with open(ASR_CONFIG_PATH, "r", encoding="utf-8") as handle:
+        with open(source, "r", encoding="utf-8") as handle:
             saved = json.load(handle)
         if isinstance(saved, dict):
             for key in config:
                 if isinstance(saved.get(key), str):
                     config[key] = saved[key]
     except (OSError, json.JSONDecodeError):
-        pass
+        saved = None
+    if source == LEGACY_ASR_CONFIG_PATH and isinstance(saved, dict):
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(ASR_CONFIG_PATH, "w", encoding="utf-8") as handle:
+                json.dump(config, handle, ensure_ascii=False, indent=2)
+            print(f"[config] 已迁移到 {ASR_CONFIG_PATH}", flush=True)
+        except OSError:
+            pass
     # Env vars are an explicit per-run override, so they win over the file.
     overrides = {
         "backend": os.environ.get("ONEPAGE_ASR"),

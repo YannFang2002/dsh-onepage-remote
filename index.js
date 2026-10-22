@@ -24,6 +24,14 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN_PORTS = [8766, 8767, 8768, 8769, 8770]
 const BRIDGE_PORTS = [8765, 8766, 8767, 8768, 8769, 8770]
 
+// Data root: models + venv are ~600 MB, so on Windows they default to D: instead
+// of the user profile on C:. Override with ONEPAGE_DATA_DIR.
+const DATA_DIR =
+  process.env.ONEPAGE_DATA_DIR ??
+  (process.platform === 'win32' ? 'D:\\onepage-agent' : path.join(os.homedir(), '.onepage-agent'))
+const LEGACY_CONFIG_PATH = path.join(os.homedir(), '.onepage-agent', 'plugin.json')
+const CONFIG_PATH = path.join(DATA_DIR, 'plugin.json')
+
 const SUMMARY_PROMPT =
   '把下面这段编码 Agent 的回复压成一句中文结论，不超过 40 字。' +
   '只输出这句话本身：不要前缀、不要引号、不要 Markdown。'
@@ -35,15 +43,25 @@ const SUMMARY_PROMPT =
 const SUMMARY_FIRST_RULE =
   '每次回答请先用一句话给出结论（不超过 40 字），再展开细节。'
 
-export const CONFIG_PATH = path.join(os.homedir(), '.onepage-agent', 'plugin.json')
-
 export function loadPluginConfig() {
-  try {
-    const saved = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
-    return { summaryMode: 'host', ...saved }
-  } catch {
-    return { summaryMode: 'host' }
+  for (const candidate of [CONFIG_PATH, LEGACY_CONFIG_PATH]) {
+    try {
+      const saved = JSON.parse(fs.readFileSync(candidate, 'utf8'))
+      if (candidate !== CONFIG_PATH) {
+        // Migrate the old location forward so the default really lives on D:.
+        try {
+          fs.mkdirSync(DATA_DIR, { recursive: true })
+          fs.writeFileSync(CONFIG_PATH, JSON.stringify(saved, null, 2))
+        } catch {
+          // read-only data dir: keep using the legacy file's values
+        }
+      }
+      return { summaryMode: 'host', ...saved }
+    } catch {
+      // try the next candidate
+    }
   }
+  return { summaryMode: 'host' }
 }
 
 function savePluginConfig(patch) {
@@ -131,10 +149,13 @@ function resolvePython() {
 
 const DEFAULT_PYTHON = resolvePython()
 const DEFAULT_SCRIPT = process.env.ONEPAGE_BRIDGE_SCRIPT ?? path.join(HERE, 'bridge', 'server.py')
+
 const DEFAULT_SITE =
-  process.env.ONEPAGE_BRIDGE_SITE ?? path.join(os.homedir(), '.onepage-agent', 'venv', 'Lib', 'site-packages')
-const DEFAULT_MODEL_DIR =
-  process.env.ONEPAGE_MODEL_DIR ?? path.join(os.homedir(), '.onepage-agent', 'models')
+  process.env.ONEPAGE_BRIDGE_SITE ??
+  (process.platform === 'win32'
+    ? path.join(DATA_DIR, 'venv', 'Lib', 'site-packages')
+    : path.join(DATA_DIR, 'venv', 'lib', 'site-packages'))
+const DEFAULT_MODEL_DIR = process.env.ONEPAGE_MODEL_DIR ?? path.join(DATA_DIR, 'models')
 
 function textOf(content) {
   if (!Array.isArray(content)) return ''
