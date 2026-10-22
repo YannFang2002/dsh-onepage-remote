@@ -12,6 +12,16 @@ Usage: python asr_runner.py <wav> <model> <model_dir> <lang>
 import json
 import sys
 
+# Whisper's zh output follows whatever it heard: a Mandarin phrase with any
+# traditional bias comes back as 繁体. The user wants 简体, and this venv already
+# has OpenCC, so normalise here rather than on the device.
+try:
+    from opencc import OpenCC
+
+    _T2S = OpenCC("t2s")
+except Exception:  # noqa: BLE001 - absence just means "no conversion"
+    _T2S = None
+
 
 def main() -> int:
     if len(sys.argv) < 2:
@@ -39,6 +49,8 @@ def main() -> int:
             beam_size=1,
         )
         text = "".join(segment.text for segment in segments).strip()
+        if _T2S is not None and text:
+            text = _T2S.convert(text)
         print(json.dumps({"ok": True, "text": text}, ensure_ascii=False))
         return 0
     except Exception as exc:  # noqa: BLE001 - report the reason to the bridge
