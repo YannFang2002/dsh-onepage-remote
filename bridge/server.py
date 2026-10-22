@@ -20,6 +20,7 @@ Discovery:
   bridge -> device               {"type":"host","host":"192.168.x.y","port":8765}
 """
 
+import hashlib
 import json
 import os
 import re
@@ -129,6 +130,75 @@ def first_sentence(text: str, max_chars: int = 120) -> str:
     if best is None:
         best = next((s for s in sentences if not filler.search(s)), sentences[0])
     return best if len(best) <= max_chars else best[:max_chars] + "…"
+
+
+# --- optional LLM summariser ------------------------------------------------
+#
+# A plugin cannot make the model write a summary first; it can only rewrite the
+# answer afterwards. That costs one extra chat call per reply, so it is opt-in:
+# "heuristic" (free, instant) or "llm" (accurate, one call). Falls back to the
+# heuristic on any error so the panel never goes blank.
+SUMMARY_PROMPT = (
+    "把下面这段编码 Agent 的回复压成一句中文结论，不超过 40 字。"
+    "只输出这句话本身：不要前缀、不要引号、不要 Markdown。"
+)
+SUMMARY_CACHE: dict = {}
+SUMMARY_LOCK = threading.Lock()
+
+
+def summarize_llm(text: str) -> str:
+    with ASR_LOCK:
+        base = (ASR["summary_base"] or ASR["api_base"]).strip()
+        key = (ASR["summary_key"] or ASR["api_key"]).strip()
+        model = (ASR["summary_model"] or ASR["api_model"]).strip()
+    if not key or not base:
+        raise RuntimeError("summary_not_configured")
+
+    digest = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+    with SUMMARY_LOCK:
+        if digest in SUMMARY_CACHE:
+            return SUMMARY_CACHE[digest]
+
+    payload = json.dumps(
+        {
+            "model": model,
+            "temperature": 0,
+            "max_tokens": 80,
+            "messages": [
+                {"role": "system", "content": SUMMARY_PROMPT},
+                {"role": "user", "content": text[:4000]},
+            ],
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        base.rstrip("/") + "/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=25) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    summary = (data["choices"][0]["message"]["content"] or "").strip()
+    summary = summary.strip('"“”').splitlines()[0].strip() if summary else ""
+
+    with SUMMARY_LOCK:
+        if len(SUMMARY_CACHE) > 100:
+            SUMMARY_CACHE.clear()
+        SUMMARY_CACHE[digest] = summary
+    return summary
+
+
+def summarize(text: str) -> tuple:
+    with ASR_LOCK:
+        mode = ASR["summary_mode"]
+    if mode == "llm":
+        try:
+            result = summarize_llm(text)
+            if result:
+                return result, "llm"
+        except Exception as exc:  # noqa: BLE001 - fall back, never fail the request
+            log_event("error", f"模型摘要失败，回落启发式：{exc}")
+    return first_sentence(text), "heuristic"
 
 
 try:
@@ -378,6 +448,13 @@ ASR_DEFAULTS = {
     # of venv + model can go on another drive instead of the system disk.
     "venv_path": os.environ.get("ONEPAGE_ASR_VENV", os.path.join(os.path.expanduser("~"), ".onepage-agent", "venv")),
     "model_dir": os.environ.get("ONEPAGE_ASR_MODEL_DIR", MODEL_DIR),
+    # How the one-sentence summary for the e-ink panel is produced:
+    #   heuristic -> free, instant, picks a sentence out of the reply
+    #   llm       -> one extra chat call, actually rewrites it into a summary
+    "summary_mode": os.environ.get("ONEPAGE_SUMMARY_MODE", "heuristic"),
+    "summary_base": os.environ.get("ONEPAGE_SUMMARY_BASE", ""),
+    "summary_key": os.environ.get("ONEPAGE_SUMMARY_KEY", ""),
+    "summary_model": os.environ.get("ONEPAGE_SUMMARY_MODEL", ""),
 }
 
 
@@ -403,6 +480,10 @@ def load_asr_config() -> dict:
         "api_model": os.environ.get("ONEPAGE_ASR_MODEL"),
         "venv_path": os.environ.get("ONEPAGE_ASR_VENV"),
         "model_dir": os.environ.get("ONEPAGE_ASR_MODEL_DIR"),
+        "summary_mode": os.environ.get("ONEPAGE_SUMMARY_MODE"),
+        "summary_base": os.environ.get("ONEPAGE_SUMMARY_BASE"),
+        "summary_key": os.environ.get("ONEPAGE_SUMMARY_KEY"),
+        "summary_model": os.environ.get("ONEPAGE_SUMMARY_MODEL"),
     }
     for key, value in overrides.items():
         if value:
@@ -622,6 +703,10 @@ def asr_summary() -> dict:
         "api_key_set": bool(snapshot["api_key"].strip()),
         "config_path": ASR_CONFIG_PATH,
         "install": install_snapshot(),
+        "summary_mode": snapshot["summary_mode"],
+        "summary_base": snapshot["summary_base"],
+        "summary_model": snapshot["summary_model"] or snapshot["api_model"],
+        "summary_key_set": bool((snapshot["summary_key"] or snapshot["api_key"]).strip()),
     }
 
 
@@ -1187,6 +1272,27 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {"ok": True, "started": started, "install": install_snapshot(), "asr": asr_summary()},
             )
+            return
+
+        # Host-internal: the plugin asks for a one-sentence summary of the last
+        # assistant message. Loopback only; the device never calls this.
+        if path == "/api/v1/summarize":
+            if not self._is_loopback():
+                self._send(403, {"ok": False, "error": "loopback_only"})
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send(400, {"ok": False, "error": "bad_json"})
+                return
+            text = body.get("text", "") if isinstance(body, dict) else ""
+            if not isinstance(text, str) or not text.strip():
+                self._send(400, {"ok": False, "error": "empty_text"})
+                return
+            summary, source = summarize(text)
+            self._send(200, {"ok": True, "summary": summary, "source": source})
             return
 
         if not self._guard():

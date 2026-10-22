@@ -346,8 +346,32 @@ export function apply(ctx) {
     const text = textOf(event.data?.message?.content).replace(/\s+/g, ' ').trim()
     if (text.length === 0) return
     lastSessionId = session?.id
+    const seq = ++replySeq
+    // Heuristic first so the panel updates instantly, then let the bridge try a
+    // real model summary (opt-in) and upgrade it if that answers.
     lastReply = summarizeReply(text)
+    void refineReply(text, seq)
   })
+
+  let replySeq = 0
+  async function refineReply(text, seq) {
+    if (runtime.bridgePort === null) return
+    try {
+      const res = await fetch(`http://127.0.0.1:${runtime.bridgePort}/api/v1/summarize`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text }),
+        signal: AbortSignal.timeout(25000),
+      })
+      const json = await res.json()
+      // Ignore a late answer for a message that is no longer the latest one.
+      if (seq === replySeq && json?.ok && json.source === 'llm' && json.summary) {
+        lastReply = json.summary
+      }
+    } catch {
+      // Bridge down or timed out: the heuristic summary already stands.
+    }
+  }
 
   const server = http.createServer(async (req, res) => {
     try {
