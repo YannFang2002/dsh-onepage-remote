@@ -69,7 +69,8 @@ PROTOCOL = "ONEPAGE-HUB"
 DEVICE_TTL_SEC = 60
 
 LAST_REPLY = "等待消息"
-_MODEL = None_MODEL_LOCK = threading.Lock()
+_MODEL = None
+_MODEL_LOCK = threading.Lock()
 _DEVICE_IPS = set()
 _DEVICE_LOCK = threading.Lock()
 
@@ -764,6 +765,13 @@ def get_model():
 
 
 def _transcribe_local(data: bytes) -> str:
+    """Transcribe with the ASR venv's own interpreter, in a subprocess.
+
+    The bridge runs under DSH's Python; the ASR venv is a different major/minor
+    version with its own compiled wheels, so importing faster-whisper in-process
+    fails on ABI mismatches (numpy / ctranslate2). A child process keeps the two
+    environments apart and also means a crash there cannot take the bridge down.
+    """
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
         handle.write(data)
         path = handle.name
@@ -774,16 +782,38 @@ def _transcribe_local(data: bytes) -> str:
                 f"{wav.getnframes() / max(1, wav.getframerate()):.1f}s",
                 flush=True,
             )
-        model = get_model()
         with ASR_LOCK:
+            venv_path = ASR["venv_path"]
+            model = ASR["local_model"]
+            model_dir = ASR["model_dir"]
             lang = ASR["lang"]
-        segments, _ = model.transcribe(
-            path,
-            language=lang,
-            vad_filter=True,
-            beam_size=1,
+
+        python = venv_python(venv_path)
+        if not os.path.exists(python):
+            raise RuntimeError(f"venv python not found: {python}")
+        runner = os.path.join(HERE, "asr_runner.py")
+
+        proc = subprocess.run(
+            [python, runner, path, model, model_dir, lang],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
         )
-        text = "".join(segment.text for segment in segments).strip()
+
+        payload = {}
+        for line in reversed((proc.stdout or "").strip().splitlines()):
+            try:
+                payload = json.loads(line)
+                break
+            except json.JSONDecodeError:
+                continue
+        if not payload.get("ok"):
+            detail = payload.get("error") or (proc.stderr or "").strip()[-300:] or "asr_failed"
+            raise RuntimeError(detail)
+
+        text = payload.get("text", "")
         if _T2S is not None:
             text = _T2S.convert(text)
         return text
