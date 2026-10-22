@@ -28,6 +28,36 @@ const SUMMARY_PROMPT =
   '把下面这段编码 Agent 的回复压成一句中文结论，不超过 40 字。' +
   '只输出这句话本身：不要前缀、不要引号、不要 Markdown。'
 
+// The rule used by the "prompt" mode: injected into the host's system prompt, so
+// the model itself leads with a conclusion instead of the plugin rewriting it
+// afterwards. Registered through ctx.systemPrompt.section(), the documented way
+// for a plugin to contribute prompt text.
+const SUMMARY_FIRST_RULE =
+  '每次回答请先用一句话给出结论（不超过 40 字），再展开细节。'
+
+export const CONFIG_PATH = path.join(os.homedir(), '.onepage-agent', 'plugin.json')
+
+export function loadPluginConfig() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    return { summaryMode: 'host', ...saved }
+  } catch {
+    return { summaryMode: 'host' }
+  }
+}
+
+function savePluginConfig(patch) {
+  const next = { ...runtime.config, ...patch }
+  runtime.config = next
+  try {
+    fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true })
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2))
+  } catch (error) {
+    console.warn('[onepage-hub] 无法保存插件配置:', error)
+  }
+  return next
+}
+
 // Bumped on every restart so a dying child cannot respawn itself on top of the
 // one that replaced it.
 let bridgeGeneration = 0
@@ -320,6 +350,40 @@ export function apply(ctx) {
   let lastSessionId
   let bridge
 
+  runtime.config = loadPluginConfig()
+
+  // --- summary mode: prompt rule (systemPrompt section) ---------------------
+  let promptRuleDisposer = null
+  const applyPromptRule = () => {
+    if (promptRuleDisposer) return
+    if (typeof ctx.systemPrompt?.section !== 'function') {
+      ctx.logger?.warn?.('[onepage-hub] 宿主没有 systemPrompt.section，prompt 模式不可用')
+      return
+    }
+    try {
+      promptRuleDisposer =
+        ctx.systemPrompt.section({
+          name: 'onepage-hub:summary-first',
+          order: 900,
+          text: SUMMARY_FIRST_RULE,
+        }) ?? null
+      ctx.logger?.info?.('[onepage-hub] 已注入「先给结论」系统提示')
+    } catch (error) {
+      ctx.logger?.warn?.(`[onepage-hub] 注入系统提示失败: ${error}`)
+    }
+  }
+  const dropPromptRule = () => {
+    if (!promptRuleDisposer) return
+    try {
+      promptRuleDisposer()
+    } catch {
+      // already disposed
+    }
+    promptRuleDisposer = null
+    ctx.logger?.info?.('[onepage-hub] 已移除「先给结论」系统提示')
+  }
+  if (runtime.config.summaryMode === 'prompt') applyPromptRule()
+
   // Restarting only the bridge is enough for bridge/server.py changes: it is a
   // separate process that re-reads the file on spawn, so DSH itself does not
   // have to be restarted. (Host plugin code, index.js, still needs an app
@@ -384,6 +448,11 @@ export function apply(ctx) {
   }
 
   async function refineReply(text, seq) {
+    const mode = runtime.config?.summaryMode ?? 'host'
+    // heuristic / prompt: the panel already shows the picked sentence, and in
+    // prompt mode the model itself now leads with a conclusion, so no rewrite.
+    if (mode === 'heuristic' || mode === 'prompt') return
+
     // 1) The host's model -- no extra key, same model the user picked in DSH.
     try {
       const summary = await summarizeWithHost(text)
@@ -668,6 +737,39 @@ export function apply(ctx) {
     sendJson(res, 200, { ok: restarted, bridgeStatus: runtime.bridgeStatus, bridgePort: runtime.bridgePort })
   }
 
+  const configHandler = async (req, res) => {
+    if (!isLocalRequest(req)) {
+      sendJson(res, 403, { ok: false, error: 'local_only' })
+      return
+    }
+    if (req.method === 'GET') {
+      sendJson(res, 200, { ok: true, config: runtime.config })
+      return
+    }
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { ok: false, error: 'method_not_allowed' })
+      return
+    }
+    let patch = {}
+    try {
+      patch = await readJsonBody(req)
+    } catch {
+      sendJson(res, 400, { ok: false, error: 'bad_json' })
+      return
+    }
+    const next = savePluginConfig({
+      summaryMode: ['heuristic', 'host', 'prompt'].includes(patch.summaryMode) ? patch.summaryMode : undefined,
+    })
+    // Apply / retire the system-prompt rule to match the new mode.
+    if (next.summaryMode === 'prompt') {
+      applyPromptRule()
+    } else {
+      dropPromptRule()
+    }
+    ctx.logger?.info?.(`[onepage-hub] 摘要模式 -> ${next.summaryMode}`)
+    sendJson(res, 200, { ok: true, config: next })
+  }
+
   try {
     ctx.inject?.(['webServer'], (httpCtx) => {
       disposeRoute(() => httpCtx.webServer.register({ kind: 'exact', path: `${PLUGIN_PREFIX}/diag`, handler: diagHandler }))
@@ -679,7 +781,10 @@ export function apply(ctx) {
       disposeRoute(() =>
         httpCtx.webServer.register({ kind: 'exact', path: `${PLUGIN_PREFIX}/bridge/restart`, handler: restartHandler }),
       )
-      ctx.logger?.info?.(`[onepage-hub] overlay 路由已注册: ${PLUGIN_PREFIX}/{diag,send,asr,asr/install,bridge/restart}`)
+      disposeRoute(() => httpCtx.webServer.register({ kind: 'exact', path: `${PLUGIN_PREFIX}/config`, handler: configHandler }))
+      ctx.logger?.info?.(
+        `[onepage-hub] overlay 路由已注册: ${PLUGIN_PREFIX}/{diag,send,asr,asr/install,bridge/restart,config}`,
+      )
     })
   } catch (error) {
     ctx.logger?.warn?.(`[onepage-hub] 无法注册 overlay 路由: ${error}`)

@@ -1,6 +1,6 @@
 {
   "name": "onepage-hub",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "private": false,
   "description": "OnePage Agent Remote: DSH host plugin + ASR bridge + LAN discovery",
   "type": "module",
