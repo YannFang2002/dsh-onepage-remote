@@ -1,20 +1,25 @@
 {
-  "name": "dsh-onepage-remote",
-  "version": "0.1.2",
+  "name": "onepage-hub",
+  "version": "0.1.5",
   "private": false,
   "description": "OnePage Agent Remote: DSH host plugin + ASR bridge + LAN discovery",
   "type": "module",
   "main": "index.js",
   "exports": {
-    ".": "./index.js"
+    ".": "./index.js",
+    "./client": "./lib/client.js"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "files": [
     "index.js",
+    "lib/",
     "bridge/",
     "cordis.patch.yml",
     "README.md"
@@ -30,6 +35,6 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/YannFang2002/dsh-onepage-remote.git"
+    "url": "https://github.com/YannFang2002/onepage-hub.git"
   }
 }
