@@ -23,6 +23,11 @@ export const inject = ['agents', 'sessions']
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN_PORTS = [8766, 8767, 8768, 8769, 8770]
 const BRIDGE_PORTS = [8765, 8766, 8767, 8768, 8769, 8770]
+
+const SUMMARY_PROMPT =
+  '把下面这段编码 Agent 的回复压成一句中文结论，不超过 40 字。' +
+  '只输出这句话本身：不要前缀、不要引号、不要 Markdown。'
+
 // Bumped on every restart so a dying child cannot respawn itself on top of the
 // one that replaced it.
 let bridgeGeneration = 0
@@ -354,7 +359,44 @@ export function apply(ctx) {
   })
 
   let replySeq = 0
+
+  // Preferred summariser: ask the host's own model, i.e. the provider/model the
+  // user already configured in DSH. A direct ctx.llm.stream() call "uses the
+  // configured provider/model pair and cap, falling back to the latest logged
+  // request target" -- so this needs no key and no extra configuration. If the
+  // service is missing (older host) or throws, refineReply falls back to the
+  // bridge and finally to the heuristic summary.
+  async function summarizeWithHost(text) {
+    const stream = ctx.llm?.stream
+    if (typeof stream !== 'function') return ''
+    let out = ''
+    const prompt = `${SUMMARY_PROMPT}\n\n${text.slice(0, 4000)}`
+    const chunks = stream({
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+    })
+    for await (const chunk of chunks) {
+      if (chunk?.type === 'text-delta') {
+        out += chunk.text ?? chunk.delta ?? ''
+      }
+      if (chunk?.type === 'finish') break
+    }
+    return out.trim()
+  }
+
   async function refineReply(text, seq) {
+    // 1) The host's model -- no extra key, same model the user picked in DSH.
+    try {
+      const summary = await summarizeWithHost(text)
+      if (seq === replySeq && summary) {
+        lastReply = summary
+        return
+      }
+    } catch (error) {
+      ctx.logger?.warn?.(`[onepage-hub] 宿主模型摘要失败，改用桥：${error}`)
+    }
+
+    // 2) The bridge (works when the host model service is unavailable, and for
+    //    bridge-only deployments).
     if (runtime.bridgePort === null) return
     try {
       const res = await fetch(`http://127.0.0.1:${runtime.bridgePort}/api/v1/summarize`, {
