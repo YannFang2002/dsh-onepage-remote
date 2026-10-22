@@ -1,4 +1,4 @@
-// DSH host plugin for the OnePage Agent Remote.
+// DSH host plugin for ONEPAGE-HUB.
 //
 // Owns the whole host side:
 //   - loopback HTTP on 8766..8770 (auto-picks the first free port)
@@ -49,7 +49,7 @@ function statusPage() {
   ]
   const body = rows.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join('')
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<title>OnePage Agent Remote · 插件状态</title>
+<title>ONEPAGE-HUB · 插件状态</title>
 <style>
  body{margin:0;padding:24px;font:14px/1.7 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;background:#f5f6f8;color:#1d2129}
  h1{font-size:17px;margin:0 0 14px}
@@ -60,10 +60,10 @@ function statusPage() {
  p{max-width:720px;color:#4e5969}
  code{background:#f2f3f5;padding:1px 5px;border-radius:4px}
 </style></head><body>
-<h1>OnePage Agent Remote · 插件</h1>
+<h1>ONEPAGE-HUB · 插件</h1>
 <table>${body}</table>
 <p>桥接进程没有在运行，所以设备暂时连不上。检查 DSH 日志里的
-<code>[onepage-remote]</code>，或直接看桥接日志文件。</p>
+<code>[onepage-hub]</code>，或直接看桥接日志文件。</p>
 </body></html>`
 }
 
@@ -225,7 +225,7 @@ function isFree(port, host) {
 
 function startBridge(ctx, bridgePort, pluginPort) {
   if (!fs.existsSync(DEFAULT_PYTHON) || !fs.existsSync(DEFAULT_SCRIPT)) {
-    ctx.logger?.warn?.('[onepage-remote] bridge python/script not found; running plugin-only')
+    ctx.logger?.warn?.('[onepage-hub] bridge python/script not found; running plugin-only')
     return null
   }
 
@@ -257,15 +257,15 @@ function startBridge(ctx, bridgePort, pluginPort) {
 
   child.on('exit', (code, signal) => {
     runtime.bridgeStatus = `exited (code=${code}${signal ? `, signal=${signal}` : ''})`
-    ctx.logger?.warn?.(`[onepage-remote] bridge exited code=${code} signal=${signal}`)
+    ctx.logger?.warn?.(`[onepage-hub] bridge exited code=${code} signal=${signal}`)
   })
   child.on('error', (error) => {
     runtime.bridgeStatus = `spawn failed: ${error}`
-    ctx.logger?.warn?.(`[onepage-remote] bridge spawn failed: ${error}`)
+    ctx.logger?.warn?.(`[onepage-hub] bridge spawn failed: ${error}`)
   })
 
-  ctx.logger?.info?.(`[onepage-remote] bridge on 8765-8770 -> ${bridgePort}, log ${logPath}`)
-  ctx.logger?.info?.(`[onepage-remote] 状态面板: http://127.0.0.1:${bridgePort}/`)
+  ctx.logger?.info?.(`[onepage-hub] bridge on 8765-8770 -> ${bridgePort}, log ${logPath}`)
+  ctx.logger?.info?.(`[onepage-hub] 状态面板: http://127.0.0.1:${bridgePort}/`)
   return { child, logFd }
 }
 
@@ -364,7 +364,7 @@ export function apply(ctx) {
 
       sendJson(res, 404, { ok: false, error: 'not_found' })
     } catch (error) {
-      ctx.logger?.warn?.(`[onepage-remote] ${error}`)
+      ctx.logger?.warn?.(`[onepage-hub] ${error}`)
       sendJson(res, 500, { ok: false, error: 'internal' })
     }
   })
@@ -372,7 +372,7 @@ export function apply(ctx) {
   // A permanent listener, so a later EADDRINUSE / socket error never becomes an
   // unhandled 'error' event that would take the DSH host down.
   server.on('error', (error) => {
-    ctx.logger?.warn?.(`[onepage-remote] ${error}`)
+    ctx.logger?.warn?.(`[onepage-hub] ${error}`)
   })
 
   void (async () => {
@@ -380,11 +380,11 @@ export function apply(ctx) {
     try {
       pluginPort = await listenOn(server, PLUGIN_PORTS, '127.0.0.1')
     } catch (error) {
-      ctx.logger?.warn?.(`[onepage-remote] cannot bind plugin port: ${error}`)
+      ctx.logger?.warn?.(`[onepage-hub] cannot bind plugin port: ${error}`)
       return
     }
     runtime.pluginPort = pluginPort
-    ctx.logger?.info?.(`[onepage-remote] plugin listening on 127.0.0.1:${pluginPort}`)
+    ctx.logger?.info?.(`[onepage-hub] plugin listening on 127.0.0.1:${pluginPort}`)
 
     let bridgePort
     for (const port of BRIDGE_PORTS) {
@@ -395,7 +395,7 @@ export function apply(ctx) {
       }
     }
     if (bridgePort === undefined) {
-      ctx.logger?.warn?.('[onepage-remote] no free bridge port in 8765-8770')
+      ctx.logger?.warn?.('[onepage-hub] no free bridge port in 8765-8770')
       return
     }
 
@@ -472,7 +472,7 @@ export function apply(ctx) {
     })
     lastSessionId = agent.id
     lastReply = '已发送到 DSH'
-    ctx.logger?.info?.(`[onepage-remote] overlay 发送: ${text.slice(0, 60)}`)
+    ctx.logger?.info?.(`[onepage-hub] overlay 发送: ${text.slice(0, 60)}`)
     sendJson(res, 200, { ok: true, reply: '已发送到 DSH', pending: true })
   }
 
@@ -503,9 +503,9 @@ export function apply(ctx) {
       disposeRoute(() => httpCtx.webServer.register({ kind: 'exact', path: `${PLUGIN_PREFIX}/diag`, handler: diagHandler }))
       disposeRoute(() => httpCtx.webServer.register({ kind: 'exact', path: `${PLUGIN_PREFIX}/send`, handler: sendHandler }))
       disposeRoute(() => httpCtx.webServer.register({ kind: 'exact', path: `${PLUGIN_PREFIX}/asr`, handler: asrHandler }))
-      ctx.logger?.info?.(`[onepage-remote] overlay 路由已注册: ${PLUGIN_PREFIX}/{diag,send,asr}`)
+      ctx.logger?.info?.(`[onepage-hub] overlay 路由已注册: ${PLUGIN_PREFIX}/{diag,send,asr}`)
     })
   } catch (error) {
-    ctx.logger?.warn?.(`[onepage-remote] 无法注册 overlay 路由: ${error}`)
+    ctx.logger?.warn?.(`[onepage-hub] 无法注册 overlay 路由: ${error}`)
   }
 }

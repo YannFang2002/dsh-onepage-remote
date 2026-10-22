@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OnePage Agent Remote host bridge.
+"""ONEPAGE-HUB host bridge.
 
 Owned by the DSH plugin (spawned as a child process). It provides:
   - local Whisper ASR
@@ -613,7 +613,7 @@ DASHBOARD_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OnePage Agent Remote · 主机状态</title>
+<title>ONEPAGE-HUB · 主机状态</title>
 <style>
   :root { color-scheme: light; }
   * { box-sizing: border-box; }
@@ -653,7 +653,7 @@ DASHBOARD_HTML = """<!doctype html>
 </style>
 </head>
 <body>
-<h1>OnePage Agent Remote · 主机状态</h1>
+<h1>ONEPAGE-HUB · 主机状态</h1>
 <div class="sub">每 1.5 秒自动刷新 · 本页面只监听本机回环地址</div>
 
 <div class="grid">
@@ -697,7 +697,7 @@ DASHBOARD_HTML = """<!doctype html>
 
 <section>
   <h2>发送测试文本到 DSH</h2>
-  <textarea id="payload">来自 OnePage 主机状态面板的连通性测试</textarea>
+  <textarea id="payload">来自 ONEPAGE-HUB 主机状态面板的连通性测试</textarea>
   <button id="send">发送</button>
   <div id="out"></div>
 </section>
