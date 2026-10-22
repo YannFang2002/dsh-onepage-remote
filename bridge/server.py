@@ -262,7 +262,10 @@ def mark_device(ip: str, source: str) -> None:
         STATE["last_hello_at"] = now_hms()
         STATE["last_seen_ts"] = time.time()
     bump("hello" if source == "hello" else "scan")
-    log_event("discovery", f"{source} 发现设备 ONEPAGE-HUB @ {ip}")
+    # Name the direction explicitly: both paths stay enabled, and "which one found
+    # the device" is the first thing to check when discovery misbehaves.
+    label = "设备主动 HELLO" if source.upper() == "HELLO" else "主机扫描应答"
+    log_event("discovery", f"{label}：{ip}")
 
 
 def scan_loop() -> None:
