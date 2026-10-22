@@ -23,6 +23,7 @@ Discovery:
 import json
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -46,6 +47,10 @@ DISCOVERY_PORT = int(os.environ.get("ONEPAGE_DISCOVERY_PORT", "8767"))
 # Wire tag for every discovery packet. Anything else on UDP 8767 hears a
 # distinctive string instead of a bare {"type":"hello"}.
 PROTOCOL = "ONEPAGE-HUB"
+# A device counts as online only while it keeps talking to us: the app sends a
+# heartbeat every 20 s, and deep sleep / leaving the app drops the WiFi link.
+# Without this the UI showed a stale address as "online" forever.
+DEVICE_TTL_SEC = 60
 
 LAST_REPLY = "等待消息"
 _MODEL = None_MODEL_LOCK = threading.Lock()
@@ -334,6 +339,10 @@ ASR_DEFAULTS = {
     "api_base": os.environ.get("ONEPAGE_ASR_API_BASE", "https://api.openai.com/v1"),
     "api_key": os.environ.get("ONEPAGE_ASR_API_KEY", ""),
     "api_model": os.environ.get("ONEPAGE_ASR_MODEL", "whisper-1"),
+    # Where the local stack lives. Both are editable from the UI so the ~600 MB
+    # of venv + model can go on another drive instead of the system disk.
+    "venv_path": os.environ.get("ONEPAGE_ASR_VENV", os.path.join(os.path.expanduser("~"), ".onepage-agent", "venv")),
+    "model_dir": os.environ.get("ONEPAGE_ASR_MODEL_DIR", MODEL_DIR),
 }
 
 
@@ -357,6 +366,8 @@ def load_asr_config() -> dict:
         "api_base": os.environ.get("ONEPAGE_ASR_API_BASE"),
         "api_key": os.environ.get("ONEPAGE_ASR_API_KEY"),
         "api_model": os.environ.get("ONEPAGE_ASR_MODEL"),
+        "venv_path": os.environ.get("ONEPAGE_ASR_VENV"),
+        "model_dir": os.environ.get("ONEPAGE_ASR_MODEL_DIR"),
     }
     for key, value in overrides.items():
         if value:
@@ -396,13 +407,167 @@ def effective_backend() -> str:
     return "api" if has_key else "local"
 
 
+def venv_python(venv_path: str) -> str:
+    if os.name == "nt":
+        return os.path.join(venv_path, "Scripts", "python.exe")
+    return os.path.join(venv_path, "bin", "python")
+
+
+def venv_site(venv_path: str) -> str:
+    if os.name == "nt":
+        return os.path.join(venv_path, "Lib", "site-packages")
+    return os.path.join(venv_path, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages")
+
+
+def ensure_site_on_path(venv_path: str) -> None:
+    site = venv_site(venv_path)
+    if os.path.isdir(site) and site not in sys.path:
+        sys.path.insert(0, site)
+
+
 def local_asr_ready() -> bool:
+    """Ready means the configured venv actually carries faster_whisper."""
+    with ASR_LOCK:
+        venv_path = ASR["venv_path"]
+    site = venv_site(venv_path)
+    if not os.path.isdir(os.path.join(site, "faster_whisper")):
+        return False
+    ensure_site_on_path(venv_path)
     try:
         import importlib.util
 
         return importlib.util.find_spec("faster_whisper") is not None
     except (ImportError, ValueError):
         return False
+
+
+def model_present() -> bool:
+    with ASR_LOCK:
+        model_dir = ASR["model_dir"]
+        name = ASR["local_model"]
+    try:
+        entries = os.listdir(model_dir)
+    except OSError:
+        return False
+    for entry in entries:
+        if entry == name or (entry.startswith("models--") and name in entry):
+            return True
+    return False
+
+
+# --- local ASR installation -------------------------------------------------
+#
+# Installing is a multi-minute, ~600 MB operation (venv + ctranslate2 + model),
+# so it must never run inside a request. It runs on a worker thread and the UI
+# polls `install` in the diag payload for stage/progress.
+INSTALL = {
+    "state": "idle",  # idle | running | done | error
+    "stage": "",
+    "progress": 0,
+    "message": "",
+    "log": deque(maxlen=30),
+    "started_at": None,
+    "finished_at": None,
+}
+INSTALL_LOCK = threading.Lock()
+
+
+def install_snapshot() -> dict:
+    with INSTALL_LOCK:
+        return {
+            "state": INSTALL["state"],
+            "stage": INSTALL["stage"],
+            "progress": INSTALL["progress"],
+            "message": INSTALL["message"],
+            "log": list(INSTALL["log"]),
+            "started_at": INSTALL["started_at"],
+            "finished_at": INSTALL["finished_at"],
+        }
+
+
+def set_install(**kwargs) -> None:
+    with INSTALL_LOCK:
+        INSTALL.update(kwargs)
+
+
+def append_install_log(line: str) -> None:
+    with INSTALL_LOCK:
+        INSTALL["log"].append(line.rstrip())
+
+
+def _run_step(cmd) -> int:
+    append_install_log("$ " + " ".join(cmd))
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            append_install_log(line)
+    return proc.wait()
+
+
+def install_worker(venv_path: str, model_dir: str, model_name: str) -> None:
+    global _MODEL
+    try:
+        os.makedirs(os.path.dirname(venv_path) or ".", exist_ok=True)
+        os.makedirs(model_dir, exist_ok=True)
+
+        if not os.path.exists(venv_python(venv_path)):
+            set_install(stage="创建虚拟环境", progress=8, message=venv_path)
+            if _run_step([sys.executable, "-m", "venv", venv_path]) != 0:
+                raise RuntimeError("虚拟环境创建失败")
+        else:
+            append_install_log(f"复用已有虚拟环境: {venv_path}")
+
+        py = venv_python(venv_path)
+        set_install(stage="安装 faster-whisper（约 100 MB）", progress=25)
+        _run_step([py, "-m", "pip", "install", "--upgrade", "pip"])
+        code = _run_step(
+            [py, "-m", "pip", "install", "--upgrade", "faster-whisper", "av==12.3.0", "opencc-python-reimplemented"]
+        )
+        if code != 0:
+            raise RuntimeError(f"pip 安装失败（exit {code}）")
+
+        set_install(stage=f"下载模型 {model_name}（约 480 MB）", progress=60)
+        ensure_site_on_path(venv_path)
+        preload = (
+            "import sys;"
+            f"sys.path.insert(0, {venv_site(venv_path)!r});"
+            "from faster_whisper import WhisperModel;"
+            f"WhisperModel({model_name!r}, device='cpu', compute_type='int8', download_root={model_dir!r});"
+            "print('MODEL_READY')"
+        )
+        if _run_step([py, "-c", preload]) != 0:
+            raise RuntimeError("模型下载失败")
+
+        set_install(state="done", stage="完成", progress=100, message="本地识别已就绪", finished_at=now_hms())
+        log_event("asr", f"本地 ASR 安装完成：{venv_path}")
+        _MODEL = None
+    except Exception as exc:  # noqa: BLE001 - surface any failure to the UI
+        set_install(state="error", stage="失败", message=str(exc), finished_at=now_hms())
+        log_event("error", f"本地 ASR 安装失败：{exc}")
+
+
+def start_install(venv_path: str, model_dir: str, model_name: str) -> bool:
+    with INSTALL_LOCK:
+        if INSTALL["state"] == "running":
+            return False
+        INSTALL.update(
+            state="running",
+            stage="准备",
+            progress=5,
+            message="",
+            log=deque(maxlen=30),
+            started_at=now_hms(),
+            finished_at=None,
+        )
+    threading.Thread(target=install_worker, args=(venv_path, model_dir, model_name), daemon=True).start()
+    return True
 
 
 def asr_summary() -> dict:
@@ -414,11 +579,14 @@ def asr_summary() -> dict:
         "lang": snapshot["lang"],
         "local_model": snapshot["local_model"],
         "local_installed": local_asr_ready(),
-        "model_dir": MODEL_DIR,
+        "model_present": model_present(),
+        "venv_path": snapshot["venv_path"],
+        "model_dir": snapshot["model_dir"],
         "api_base": snapshot["api_base"],
         "api_model": snapshot["api_model"],
         "api_key_set": bool(snapshot["api_key"].strip()),
         "config_path": ASR_CONFIG_PATH,
+        "install": install_snapshot(),
     }
 
 
@@ -426,16 +594,20 @@ def get_model():
     global _MODEL
     with _MODEL_LOCK:
         if _MODEL is None:
-            from faster_whisper import WhisperModel
-
             with ASR_LOCK:
                 model_name = ASR["local_model"]
-            print(f"[asr] loading Whisper {model_name} ...", flush=True)
+                model_dir = ASR["model_dir"]
+                venv_path = ASR["venv_path"]
+            # A venv installed from the UI is not on this interpreter's path yet.
+            ensure_site_on_path(venv_path)
+            from faster_whisper import WhisperModel
+
+            print(f"[asr] loading Whisper {model_name} from {model_dir} ...", flush=True)
             _MODEL = WhisperModel(
                 model_name,
                 device="cpu",
                 compute_type="int8",
-                download_root=MODEL_DIR,
+                download_root=model_dir,
             )
             print("[asr] model ready", flush=True)
         return _MODEL
@@ -566,6 +738,7 @@ def diag_snapshot() -> dict:
         counts = dict(STATE["counts"])
         device_ip = STATE["device_ip"]
         last_hello_at = STATE["last_hello_at"]
+        last_seen_ts = STATE["last_seen_ts"]
         last = {
             "text": STATE["last_text"],
             "reply": STATE["last_reply"],
@@ -593,6 +766,9 @@ def diag_snapshot() -> dict:
             "ip": device_ip,
             "last_hello_at": last_hello_at,
             "paired": paired,
+            "online": last_seen_ts is not None and (time.time() - last_seen_ts) < DEVICE_TTL_SEC,
+            "last_seen_ago": None if last_seen_ts is None else int(time.time() - last_seen_ts),
+            "ttl_sec": DEVICE_TTL_SEC,
         },
         "dsh": {
             "reachable": dsh is not None,
@@ -864,6 +1040,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _guard(self) -> bool:
         if device_allowed(self.client_address[0]):
+            # Any real request from the device proves it is awake and connected.
+            if not self._is_loopback():
+                with STATE_LOCK:
+                    STATE["last_seen_ts"] = time.time()
             return True
         self._send(403, {"ok": False, "error": "device_not_paired"})
         return False
@@ -886,6 +1066,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if not self._guard():
+            return
+        if path == "/api/v1/heartbeat":
+            self._send(200, {"ok": True, "protocol": PROTOCOL})
             return
         if path != "/api/v1/status":
             self._send(404, {"ok": False, "error": "not_found"})
@@ -941,6 +1124,34 @@ class Handler(BaseHTTPRequestHandler):
                 f"ASR 后端已设为 {saved['backend']}（实际使用 {effective_backend()}）",
             )
             self._send(200, {"ok": True, "asr": asr_summary()})
+            return
+
+        # One-click local ASR install. Body may carry venv_path / model_dir /
+        # local_model so the ~600 MB can be placed on another drive; the work
+        # itself happens on a worker thread and is polled via diag.asr.install.
+        if path == "/api/v1/asr-install":
+            if not self._is_loopback():
+                self._send(403, {"ok": False, "error": "dashboard_loopback_only"})
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send(400, {"ok": False, "error": "bad_json"})
+                return
+            if isinstance(body, dict) and body:
+                save_asr_config({k: v for k, v in body.items() if isinstance(v, str)})
+            with ASR_LOCK:
+                venv_path = ASR["venv_path"]
+                model_dir = ASR["model_dir"]
+                model_name = ASR["local_model"]
+            started = start_install(venv_path, model_dir, model_name)
+            log_event("asr", f"开始安装本地 ASR（{model_name}）→ {venv_path}")
+            self._send(
+                200,
+                {"ok": True, "started": started, "install": install_snapshot(), "asr": asr_summary()},
+            )
             return
 
         if not self._guard():

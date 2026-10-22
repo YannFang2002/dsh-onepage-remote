@@ -498,12 +498,37 @@ export function apply(ctx) {
 
   const disposeRoute = (register) => (typeof ctx.effect === 'function' ? ctx.effect(register) : register())
 
+  const installHandler = async (req, res) => {
+    if (!isLocalRequest(req)) {
+      sendJson(res, 403, { ok: false, error: 'local_only' })
+      return
+    }
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { ok: false, error: 'method_not_allowed' })
+      return
+    }
+    const chunks = []
+    for await (const chunk of req) chunks.push(chunk)
+    const body = Buffer.concat(chunks)
+    // Installing takes minutes (~600 MB). The bridge answers immediately and the
+    // UI polls diag.asr.install, so this request never blocks the DSH host.
+    const result = await bridgeFetch('/api/v1/asr-install', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    })
+    sendJson(res, 200, result ?? { ok: false, error: 'bridge_down' })
+  }
+
   try {
     ctx.inject?.(['webServer'], (httpCtx) => {
       disposeRoute(() => httpCtx.webServer.register({ kind: 'exact', path: `${PLUGIN_PREFIX}/diag`, handler: diagHandler }))
       disposeRoute(() => httpCtx.webServer.register({ kind: 'exact', path: `${PLUGIN_PREFIX}/send`, handler: sendHandler }))
       disposeRoute(() => httpCtx.webServer.register({ kind: 'exact', path: `${PLUGIN_PREFIX}/asr`, handler: asrHandler }))
-      ctx.logger?.info?.(`[onepage-hub] overlay 路由已注册: ${PLUGIN_PREFIX}/{diag,send,asr}`)
+      disposeRoute(() =>
+        httpCtx.webServer.register({ kind: 'exact', path: `${PLUGIN_PREFIX}/asr/install`, handler: installHandler }),
+      )
+      ctx.logger?.info?.(`[onepage-hub] overlay 路由已注册: ${PLUGIN_PREFIX}/{diag,send,asr,asr/install}`)
     })
   } catch (error) {
     ctx.logger?.warn?.(`[onepage-hub] 无法注册 overlay 路由: ${error}`)
