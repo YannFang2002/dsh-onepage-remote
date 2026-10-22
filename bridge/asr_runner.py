@@ -12,6 +12,12 @@ Usage: python asr_runner.py <wav> <model> <model_dir> <lang>
 import json
 import sys
 
+# Steer the decoder: Whisper's zh output can come back as 繁体 even for Mandarin
+# audio. A simplified-Chinese prompt biases the token stream toward 简体 at
+# generation time, which is the real fix; OpenCC below is only a safety net for
+# the cases the prompt does not catch.
+PROMPT_ZH = "以下是普通话的句子，请使用简体中文输出。"
+
 # Whisper's zh output follows whatever it heard: a Mandarin phrase with any
 # traditional bias comes back as 繁体. The user wants 简体, and this venv already
 # has OpenCC, so normalise here rather than on the device.
@@ -47,6 +53,7 @@ def main() -> int:
             language=lang or None,
             vad_filter=True,
             beam_size=1,
+            initial_prompt=PROMPT_ZH if (lang or "").lower().startswith("zh") else None,
         )
         text = "".join(segment.text for segment in segments).strip()
         if _T2S is not None and text:
