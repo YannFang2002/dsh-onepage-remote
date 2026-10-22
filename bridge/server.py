@@ -22,6 +22,7 @@ Discovery:
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -97,6 +98,16 @@ def log_event(kind: str, message: str) -> None:
 def bump(key: str) -> None:
     with STATE_LOCK:
         STATE["counts"][key] = STATE["counts"].get(key, 0) + 1
+
+
+def first_sentence(text: str, max_chars: int = 120) -> str:
+    """The device shows one sentence: it cannot render Markdown and a full reply
+    never fits. Strip markers, collapse whitespace, cut at the first terminator."""
+    cleaned = re.sub(r"[*`#_~]", "", str(text))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    match = re.match(r"^[^。！？!?]*[。！？!?]", cleaned)
+    sentence = match.group(0) if match else cleaned
+    return sentence if len(sentence) <= max_chars else sentence[:max_chars] + "…"
 
 
 try:
@@ -1081,7 +1092,7 @@ class Handler(BaseHTTPRequestHandler):
         if dsh is not None:
             reply = dsh.get("lastReply")
             if isinstance(reply, str):
-                dsh["lastReply"] = " ".join(reply.split())[:80]
+                dsh["lastReply"] = first_sentence(reply)
             self._send(200, dsh)
             return
         self._send(

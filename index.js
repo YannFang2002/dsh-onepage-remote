@@ -110,6 +110,19 @@ function textOf(content) {
     .trim()
 }
 
+// The e-ink panel cannot render Markdown and a full agent answer never fits, so
+// the device's contract is "first sentence only". Trim it here, once, instead of
+// letting every consumer chop the string mid-word.
+function firstSentence(text, maxChars = 120) {
+  const cleaned = String(text ?? '')
+    .replace(/[*`#_~]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const match = cleaned.match(/^[^。！？!?]*[。！？!?]/)
+  const sentence = match ? match[0] : cleaned
+  return sentence.length > maxChars ? `${sentence.slice(0, maxChars)}…` : sentence
+}
+
 function liveAgents(ctx) {
   const service = ctx.agents
   if (typeof service?.roots === 'function') return service.roots()
@@ -320,7 +333,7 @@ export function apply(ctx) {
     const text = textOf(event.data?.message?.content).replace(/\s+/g, ' ').trim()
     if (text.length === 0) return
     lastSessionId = session?.id
-    lastReply = text.slice(0, 80)
+    lastReply = firstSentence(text)
   })
 
   const server = http.createServer(async (req, res) => {
