@@ -214,12 +214,27 @@ function pickAgent(ctx, preferredId) {
 function titleOf(ctx, agent) {
   const session = agent?.session
   if (session === undefined) return ''
+
+  // 1) The dedicated service, when this plugin can see it.
   try {
     const value = ctx.sessionTitle?.get?.(session)
-    if (typeof value === 'string') return value
+    if (typeof value === 'string' && value.length > 0) return value
     if (value !== null && typeof value === 'object' && typeof value.title === 'string') return value.title
   } catch {
-    // no title service mounted, or the session has no title yet
+    // service not mounted for this plugin, or no title yet
+  }
+
+  // 2) Fold the session log the way foldSessionTitle() does: the latest
+  //    session/title event's data.title. Works for titles that were generated
+  //    before this plugin started, which the event listener would miss.
+  const log = session.log
+  if (Array.isArray(log)) {
+    for (let i = log.length - 1; i >= 0; i -= 1) {
+      const entry = log[i]
+      if (entry?.type === 'session/title' && typeof entry.data?.title === 'string') {
+        return entry.data.title
+      }
+    }
   }
   return ''
 }
