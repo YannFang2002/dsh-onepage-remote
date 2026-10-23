@@ -368,6 +368,8 @@ function startBridge(ctx, bridgePort, pluginPort, generation) {
 
 export function apply(ctx) {
   let lastReply = ''
+  // First user line of the current session, used as a lightweight title.
+  let lastUserText = ''
   let lastSessionId
   let bridge
 
@@ -432,6 +434,14 @@ export function apply(ctx) {
   }
 
   ctx.on('session/event', (session, event) => {
+    if (event?.type === 'user/message') {
+      const userText = textOf(event.data?.message?.content).replace(/\s+/g, ' ').trim()
+      if (userText.length > 0) {
+        lastSessionId = session?.id
+        lastUserText = userText.slice(0, 60)
+      }
+      return
+    }
     if (event?.type !== 'assistant/message') return
     const text = textOf(event.data?.message?.content).replace(/\s+/g, ' ').trim()
     if (text.length === 0) return
@@ -534,6 +544,8 @@ export function apply(ctx) {
           ok: true,
           agent: 'DSH',
           repo: repoOf(agent),
+          workspace: repoOf(agent),
+          sessionTitle: lastUserText,
           state: agent?.status ?? 'idle',
           lastReply,
           sessionId: agent?.id ?? null,
