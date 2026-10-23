@@ -208,6 +208,13 @@ function pickAgent(ctx, preferredId) {
   return agents.find((agent) => agent?.status === 'running') ?? agents[agents.length - 1]
 }
 
+function titleOf(agent) {
+  // DSH keeps a real session title: the latest `session/title` event, exposed as
+  // session.title on the snapshot. Fall back to the first user line only when a
+  // title has not landed yet.
+  const title = agent?.session?.title
+  return typeof title === 'string' ? title : ''
+}
 function repoOf(agent) {
   const cwd = agent?.session?.meta?.cwd
   return typeof cwd === 'string' && cwd.length > 0 ? path.basename(cwd) : ''
@@ -545,7 +552,7 @@ export function apply(ctx) {
           agent: 'DSH',
           repo: repoOf(agent),
           workspace: repoOf(agent),
-          sessionTitle: lastUserText,
+          sessionTitle: titleOf(agent) || lastUserText,
           state: agent?.status ?? 'idle',
           lastReply,
           sessionId: agent?.id ?? null,
