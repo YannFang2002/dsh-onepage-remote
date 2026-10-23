@@ -208,12 +208,28 @@ function pickAgent(ctx, preferredId) {
   return agents.find((agent) => agent?.status === 'running') ?? agents[agents.length - 1]
 }
 
-function titleOf(agent) {
-  // DSH keeps a real session title: the latest `session/title` event, exposed as
-  // session.title on the snapshot. Fall back to the first user line only when a
-  // title has not landed yet.
-  const title = agent?.session?.title
-  return typeof title === 'string' ? title : ''
+// Session titles come from the `sessionTitle` service (documented in
+// @deepseek-ai/dsh-session-title): get(session) returns the latest folded title,
+// which already falls back to the first eligible human message.
+function titleOf(ctx, agent) {
+  const session = agent?.session
+  if (session === undefined) return ''
+  try {
+    const value = ctx.sessionTitle?.get?.(session)
+    if (typeof value === 'string') return value
+    if (value !== null && typeof value === 'object' && typeof value.title === 'string') return value.title
+  } catch {
+    // no title service mounted, or the session has no title yet
+  }
+  return ''
+}
+
+// Working directory lives on the session header (creation metadata), not on meta.
+function workspaceOf(agent) {
+  const header = agent?.session?.header
+  const cwd = header?.cwd ?? header?.workingDirectory
+  if (typeof cwd === 'string' && cwd.length > 0) return path.basename(cwd)
+  return ''
 }
 function repoOf(agent) {
   const cwd = agent?.session?.meta?.cwd
@@ -377,6 +393,8 @@ export function apply(ctx) {
   let lastReply = ''
   // First user line of the current session, used as a lightweight title.
   let lastUserText = ''
+  // Latest session/title event text, used when the title service is absent.
+  let lastSessionTitle = ''
   let lastSessionId
   let bridge
 
@@ -441,6 +459,13 @@ export function apply(ctx) {
   }
 
   ctx.on('session/event', (session, event) => {
+    if (event?.type === 'session/title') {
+      const next = event.data?.title ?? event.data?.text
+      if (typeof next === 'string' && next.length > 0) {
+        lastSessionTitle = next
+      }
+      return
+    }
     if (event?.type === 'user/message') {
       const userText = textOf(event.data?.message?.content).replace(/\s+/g, ' ').trim()
       if (userText.length > 0) {
@@ -551,8 +576,8 @@ export function apply(ctx) {
           ok: true,
           agent: 'DSH',
           repo: repoOf(agent),
-          workspace: repoOf(agent),
-          sessionTitle: titleOf(agent) || lastUserText,
+          workspace: workspaceOf(agent),
+          sessionTitle: titleOf(ctx, agent) || lastSessionTitle || lastUserText,
           state: agent?.status ?? 'idle',
           lastReply,
           sessionId: agent?.id ?? null,
